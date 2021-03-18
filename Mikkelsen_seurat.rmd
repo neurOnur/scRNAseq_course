@@ -1,5 +1,5 @@
 ---
-title: "Mikkelsen_seurat"
+title: "Mickelsen_seurat"
 output:
   html_document: default
 ---
