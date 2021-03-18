@@ -1,0 +1,422 @@
+---
+title: "Mickelsen_seurat"
+output:
+  html_document: default
+---
+
+# This notebook takes the rds file containing Campbel et al data and performs the preanalysis
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+# Notes on what a notebook is
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+# End of the notes
+
+## Let's start with the analysis
+
+```{r load_libraries}
+# Load the libraries
+library(Seurat)
+library(ggplot2)
+library(RColorBrewer)
+library(readr)
+library(hdf5r)
+library(Matrix)
+```
+
+# Shape the data  
+Start by loading. ou may need to use different functiona to retrieve data from a file. This might include a table that is tab seperated or semi-colon seperated, csv file (comma seperated), lloom format... etc. Here, we will use the most common format, a matrix
+
+```{r load_data}
+setwd('/Users/onurbasak/Documents/1_BCRM/3_computational_analysis/analysis_sc/Adan/literature/Mickelsen_NatNeurosci_2019_hypothalamus/')
+datamatrix <- readMM("./GSE125065_RAW/GSM3562050_AJ17001_matrix.mtx")
+print(dim(datamatrix))
+```
+
+```{r}
+head(datamatrix)
+```
+As you can see, tehre are no gene or cell names in this file. Also note that tehre are many 'empty' slots, where there is no data. This is called a 'sparse matrix' where only the relevant data is written (in this case 0 is not mentioned at all) 
+
+The gene and cell names are provided seperately
+
+```{r load_features_barcodes}
+features <- read.table("./GSE125065_RAW/GSM3562050_AJ17001_genes.tsv",header = FALSE,row.names = NULL, sep = '\t')
+cells <- read.table("./GSE125065_RAW/GSM3562050_AJ17001_barcodes.tsv",header = FALSE,row.names = NULL, sep = '\t')
+features
+```
+
+```{r create_dataframe}
+rawdata <- as.data.frame(datamatrix, row.names = features[,2])
+colnames(rawdata) <- cells[,1]
+dim(rawdata)
+head(rawdata)
+```
+
+## Time to make a Seurat object
+Here:
+- min.cells is a way to filer **genes**. Enter the minimum number of cells that need to express a given gene
+- min.features is a way to filer **cells**Enter the minimum number of genes that a cell needs to express
+- project is a random name you give
+- meta.data is an object with the same number of cells as your dataset... We dont really have it here
+
+
+```{r seurat_object}
+data <- CreateSeuratObject(counts = rawdata, min.cells = 2, min.features = 1000, 
+                          project = "Mikkelsen")
+data
+```
+Check if the percent.mito and percent.ERCC are provided. If yes, place these in respect places.
+
+## ERRC and mito quality controls
+The following are not available for Campbell dataset, but may be useful later on
+
+```{r mito_ERCC_setup}
+##The features that start with ERCC are ERCC spike-ins
+#ERCC.data.index <- grep(pattern = "^ERCC", x = rownames(rawdata), value = FALSE)
+#percent.ERCC.data <- Matrix::colSums(rawdata[ERCC.data.index, ])/Matrix::colSums(rawdata)
+#rawdata <- rawdata[-ERCC.data.index, ]
+#check
+#percent.ERCC.data #there is none
+
+##Took chrM, bust can use ^mt for mito genes
+mito.data.index <- grep(pattern = "^mt", x = rownames(x = rawdata), value = FALSE)
+percent.mito.data <- Matrix::colSums(rawdata[mito.data.index, ])/Matrix::colSums(rawdata)
+#percent.mito.data
+
+#Now place hte mito percentages into a new slot
+data[['percent.mito']] <- percent.mito.data
+#data[['percent.ERCC']] <- percent.ERCC.data
+data
+
+```
+
+## Let's inspect the data
+
+metrics
+You can check some metric as follows
+```{r metrics}
+# And here are some numbers
+median(data@meta.data$nCount_RNA) # raw data 4327
+mean(data@meta.data$nCount_RNA) # raw data 5028.048 
+max(data@meta.data$nCount_RNA) # raw data 70708
+```
+
+
+Note that this is transformed data!
+```{r judge_data_visually}
+#judge data visually
+FeatureScatter(object = data, feature1 = "nCount_RNA", feature2 = "percent.mito")
+#FeatureScatter(object = data, feature1 = "nCount_RNA", feature2 = "percent.ERCC")
+FeatureScatter(object = data, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+VlnPlot(object = data, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2) #, 'percent.mito', "percent.ERCC"
+#VlnPlot(object = data, features = "percent.mito")
+VlnPlot(object = data, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2,pt.size = 0)
+```
+
+# Preprocessing
+filter
+```{r filter_normalise_finvariablegenes}
+data <- subset(x = data, subset = percent.mito < 0.2 ) # & percent.ERCC < 0.4
+```
+
+```{r exclude_mito}
+# Get rid of the mitochondrial genes which we do not need for downstream analysis
+data <- subset(x = data[-grep(pattern = "^mt-", x = rownames(data), value = FALSE)])
+data
+```
+
+normalize and find variable features
+```{r normalise variable genes}
+data <- NormalizeData(object = data, normalization.method = "LogNormalize", scale.factor = 10000)
+data <- FindVariableFeatures(object = data)
+```
+
+You can also see what these variable genes are
+```{r plot_variable_genes}
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(data), 10)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(data)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+#CombinePlots(plots = list(plot1, plot2))
+plot1
+plot2
+```
+
+Scale and regress
+Here, we can get rid of some confoundaing factor effects. In other words, here we consider that teh amount of mitochondrial genes effect the normalisation of the data. Thus, we want to get rid of this using regression
+```{r Scale_regress}
+data <- ScaleData(object = data, features = VariableFeatures(data), vars.to.regress = c("percent.mito") ) 
+
+```
+
+
+## PCA: Run your first dimensionality reduction
+Principle component analysis allows you to see the variation in your dataset
+```{r pca}
+data <- RunPCA(object = data, features = VariableFeatures(data), verbose = FALSE)
+data #734 cells left
+```
+
+Determine dimensions to use
+JackStraw function evaluates whetehr the variation in each principle component is significant or by chance. We can us this to choose which components we should use for hte downstream analysis
+
+P.S. Jackstraw takes some time...
+
+```{r JackStraw}
+data <- JackStraw(object = data, num.replicate = 100, dims = 50)
+data <- ScoreJackStraw(object = data, dims = 1:50)
+JackStrawPlot(object = data, dims = 1:50) 
+JackStrawPlot(object = data, dims = 1:10)
+```
+
+## Find clusters
+Not that the 'resolution' will change the number of clusters
+```{r cluster}
+data <- FindNeighbors(object = data, dims = 1:50)
+data <- FindClusters(object = data, resolution = 1)
+```
+
+Now that we calculated the clusters, let's use the VioPlot function again
+
+```{r VlnPlot_basics}
+VlnPlot(object = data, features = "nFeature_RNA", pt.size = 0)
+VlnPlot(object = data, features =  "nCount_RNA", pt.size = 0)
+```
+
+
+## run tsne and umap dimensionality reduction, plot
+```{r tsne}
+data <- RunTSNE(object = data, dims = 1:50)
+DimPlot(object = data, reduction = 'tsne', label = TRUE, label.size = 6)
+ggsave(filename="clusters_tsne.pdf", plot=DimPlot(object = data, reduction = 'tsne', label = TRUE, label.size = 6))
+```
+
+```{r umap}
+data <- RunUMAP(object = data, dims = 1:50)
+DimPlot(object = data, reduction = 'umap', label = TRUE, label.size = 6)
+#save
+ggsave(filename="clusters_umap.pdf", plot=DimPlot(object = data, reduction = 'umap', label = TRUE, label.size = 6))
+```
+
+## plot some marker genes
+```{r featureplot}
+#find gene markers for cell types
+markers_1 <- c('Tubb3', 'Rax', 'Sox2', 'Sox10')
+markers_2 <- c('Lepr', 'Ghrh', 'Agrp', 'Trh')
+
+# Plot
+FeaturePlot(object = data, features = markers_1) #this might be too crowded
+FeaturePlot(object = data, features = markers_2) #this might be too crowded
+
+```
+
+save the plots that you make
+```{r save_plots}
+# save
+ggsave(filename="markers_all_cells_1.pdf", plot=VlnPlot(object = data, features = markers_1))
+ggsave(filename="markers_all_cells_2.pdf", plot=VlnPlot(object = data, features = markers_2))
+```
+
+or plot the genes using VlnPlot
+```{r VlnPlot}
+VlnPlot(object = data, features = "Tubb3") #neuron 
+VlnPlot(object = data, features = "Pecam1") #endothelial
+VlnPlot(object = data, features = c("Slc17a6", "Slc32a1")) #glut, gaba
+```
+
+## find all markers per cluster in whole data set
+This is some sort of a differential gene expression analysis
+
+This may also take some time...
+
+```{r}
+data.markers = FindAllMarkers(object = data, only.pos = TRUE, mind.pct = 0.25, logfc.threshold = 0.25)
+
+```
+
+save as an excel workbook
+
+```{r import_openxlsx}
+# If you dont have openxlsx, run the following:
+#install.packages("openxlsx", dependencies=TRUE)
+library(openxlsx)
+```
+
+```{r save_markers}
+wb <- createWorkbook()
+for ( n in unique(data.markers$cluster) ) {
+  addWorksheet(wb, n)
+  writeData(wb, n, data.markers[data.markers$cluster == n,], startCol = 1, startRow = 1, rowNames = TRUE, colNames = TRUE)
+}
+saveWorkbook(wb, paste("diff_genes.xlsx"), overwrite = TRUE)
+
+```
+
+```{r}
+## see how many clusters are there... Dont forget it starts with zero (0)
+levels(data)
+```
+
+## renames cluster
+```{r rename_clusters}
+# you list had to have the same length as the number of clusters
+# e.g.
+cluster.ids <- c(0:26)
+# cluster.ids <- c("Agrp neurons 1","Vlmcs","Endothelial 1","Gjd2 neurons","Tanycytes 1","Tanycytes 2","Tanycytes 3","Endothelial 2","Agrp neurons 2","Agrp neurons 3", "Nrn1 neurons","Tanycytes 4","Endothelial 3","Pituitary cells","Pomc neurons", "Astrocytes","Crhr2 neurons","Agrp neurons Fasted","19")
+# 
+names(cluster.ids) <- levels(data)
+data <- RenameIdents(data, cluster.ids)
+data@active.ident <- factor(data@active.ident, levels = cluster.ids)
+
+DimPlot(object = data, reduction = 'umap', label = TRUE, label.size = 4, repel = TRUE)
+DimPlot(object = data, reduction = 'umap', label = TRUE, label.size = 4, repel = TRUE) + NoLegend() + NoAxes()
+
+```
+
+
+## save the seurat object
+This can be loaded again without the need to go through the whole preprocessing again
+```{r save_seurat_obj}
+saveRDS(data,"Campbell_processed.rds")
+```
+
+If you want to continue with this dataset, you can upload it later
+```{r load_seurat_obj}
+data <- readRDS("Campbell_processed.rds")
+```
+
+
+# subset neuronal clusters 
+Sometimes, it is better to do the analysis hierarchical
+In this way, you can find out the differences between cell types better. Here we will take the neurons and generate a new seurat object, followind by identification of variable features, scaling and determining marker genes
+
+!!!Clusters were shosen from the violinplots above... Place the clusters that you think are neuronal using hte plots above. Alternatively, you can use the cut-off for expression level of a marker gene per cell
+
+```{r subset_neurons}
+# First way, by choosing clusters
+data.neurons <- SubsetData(object = data, ident.use = c(0,2,3,5,8,9,10,11,12,13,15,18,19,20))
+# Second way, by looking at gene expression level
+dim(subset(x = data, subset = Tubb3 > 0 & Mapt > 0))
+data.neurons <- subset(x = data, subset = Tubb3 > 0 & Mapt > 0)
+```
+
+```{r preprocess_neurons_pcs}
+data.neurons <- FindVariableFeatures(object = data.neurons)
+data.neurons <- ScaleData(object = data.neurons, features = VariableFeatures(data.neurons), vars.to.regress = c("percent.mito"))
+data.neurons <- RunPCA(object = data.neurons, features = VariableFeatures(data.neurons), verbose = FALSE)
+data.neurons <- JackStraw(object = data.neurons, num.replicate = 100, dims = 40)
+data.neurons <- ScoreJackStraw(object = data.neurons, dims = 1:40)
+JackStrawPlot(object = data.neurons, dims = 1:40) # check which ones show statistical significance
+```
+
+## cluster neuronal data 
+
+```{r cluster_neuronal}
+data.neurons <- FindNeighbors(object = data.neurons, dims = 1:40)
+data.neurons <- FindClusters(object = data.neurons, resolution = 1) 
+data.neurons <- RunTSNE(object = data.neurons, dims = 1:40)
+DimPlot(object = data.neurons, reduction = 'tsne', label = TRUE, label.size = 6)
+data.neurons <- RunUMAP(object = data.neurons, dims = 1:40)
+DimPlot(object = data.neurons, reduction = 'umap', label = TRUE, label.size = 6)
+
+data.neurons # 343 cells left, ~330 for when you use min.features = 3000
+
+```
+
+create wb excel
+```{r save_markers}
+data.markers.neurons <- FindAllMarkers(object = data.neurons, min.pct = 0.25, only.pos = TRUE, logfc.threshold = 0.25 )
+
+wb <- createWorkbook()
+for ( n in unique(data.markers.neurons$cluster) ) {
+  addWorksheet(wb, n)
+  writeData(wb, n, data.markers.neurons[data.markers.neurons$cluster == n,], startCol = 1, startRow = 1, rowNames = TRUE, colNames = TRUE)
+}
+saveWorkbook(wb, paste("diff genes neuronal.xlsx"), overwrite = TRUE)
+
+```
+
+save some nice plots
+```{r}
+ggsave(filename="violingeplot markers gaba glut th.pdf", plot=VlnPlot(object = data.neurons, features = c("Slc17a6", "Slc32a1", "Th")))
+ggsave(filename="violingeplot markers npy cartpt.pdf", plot=VlnPlot(object = data.neurons, features = c("Npy", "Cartpt")))
+
+```
+
+## save seurat object neuronal
+This can be loaded again without the need to go through the whole preprocessing again
+```{r save_seurat_obj_neuoral}
+saveRDS(data.neurons,"Campbell_processed_neuoral.rds")
+```
+
+If you want to continue with this dataset, you can upload it later
+```{r load_seurat_obj_neuoral}
+data.neurons <- readRDS("Campbell_processed_neuoral.rds")
+data.neurons
+```
+
+This is a simplified way of looking at the data. However, most of hte published datasets are already batch affect corrected, quality controlled etc making it rather straightforward to reanalyse
+
+Finally, save the data. You can also convert this file to a format that could be read in scanpy (needs additional installations)
+
+# PRACTICE
+You can continue to subset 
+- GABAergic neurons
+- Glutamergic neurons
+astrocytes, oligodendrocytes... etc
+
+## sctranscform
+There are different ways to normalise, hich we will see inthe future
+In seurat, a new way of doing this is scTranscform
+PRACTICE -> Try "sctransform" instead of "lognormalise" and see the differences
+!!!The following command replaces NormalizeData, ScaleData, and FindVariableFeatures!!!
+!!! This means you wont run the following these again
+
+```{r sctransform echo=FALSE}
+data.sc <- SCTransform(data, vars.to.regress = "percent.mito", verbose = FALSE)
+data.sc
+
+```
+
+Let's see how variable genes look like compared to before
+```{r plot_variable_genes}
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(data.sc), 10)
+
+# plot variable features with and without labels
+plot3 <- VariableFeaturePlot(data.sc)
+plot4 <- LabelPoints(plot = plot3, points = top10, repel = TRUE)
+#CombinePlots(plots = list(plot1, plot2))
+plot1 #from earlier
+plot3
+plot2 #from earlier
+plot4
+```
+
+```{r}
+data.sc <- RunPCA(object = data.sc, features = VariableFeatures(data.sc), verbose = FALSE)
+data.sc <- FindNeighbors(object = data.sc, dims = 1:50)
+data.sc <- FindClusters(object = data.sc, resolution = 1)
+VlnPlot(object = data.sc, features = "nFeature_RNA", pt.size = 0)
+VlnPlot(object = data.sc, features =  "nCount_RNA", pt.size = 0)
+data.sc <- RunTSNE(object = data.sc, dims = 1:50)
+DimPlot(object = data.sc, reduction = 'tsne', label = TRUE, label.size = 6)
+ggsave(filename="clusters_tsne_scT.pdf", plot=DimPlot(object = data.sc, reduction = 'tsne', label = TRUE, label.size = 6))
+data.sc <- RunUMAP(object = data.sc, dims = 1:50)
+DimPlot(object = data.sc, reduction = 'umap', label = TRUE, label.size = 6)
+#save
+ggsave(filename="clusters_umap_scT.pdf", plot=DimPlot(object = data.sc, reduction = 'umap', label = TRUE, label.size = 6))
+```
+
